@@ -22,6 +22,15 @@ const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
 
+function augmentSystemPrompt(basePrompt: string): string {
+	return (
+		basePrompt +
+		"\n\nYou MUST include full URLs for every source you cite. " +
+		"Format sources as markdown links: [Source Title](https://example.com/page). " +
+		"List all referenced sources at the end of your answer as a numbered list with clickable URLs."
+	);
+}
+
 let discoveredModel: string | null = null;
 
 async function resolveModel(auth: { accessToken: string; accountId: string }): Promise<string> {
@@ -110,6 +119,22 @@ interface CodexResponse {
 
 function isImagePlaceholderAnswer(text: string): boolean {
 	return text.trim().toLowerCase() === "(see attached image)";
+}
+
+const MARKDOWN_LINK_RE = /\[([^\]]*?)\]\((https?:\/\/[^\s)]+)\)/g;
+
+function extractMarkdownLinks(text: string): SearchSource[] {
+	const sources: SearchSource[] = [];
+	const seen = new Set<string>();
+	for (const match of text.matchAll(MARKDOWN_LINK_RE)) {
+		const title = (match[1] ?? "").trim();
+		const url = match[2] ?? "";
+		if (!url) continue;
+		if (seen.has(url)) continue;
+		seen.add(url);
+		sources.push({ title: title || url, url });
+	}
+	return sources;
 }
 
 /**
@@ -234,7 +259,7 @@ async function callCodexSearch(
 				search_context_size: options.searchContextSize ?? "high",
 			},
 		],
-		instructions: options.systemPrompt ?? DEFAULT_INSTRUCTIONS,
+		instructions: augmentSystemPrompt(options.systemPrompt ?? DEFAULT_INSTRUCTIONS),
 	};
 
 	const response = await fetch(url, {
@@ -338,6 +363,12 @@ async function callCodexSearch(
 			: streamedAnswer.length > 0
 				? streamedAnswer
 				: finalAnswer;
+
+	// Extract markdown links from answer text as sources fallback
+	if (sources.length === 0 && answer) {
+		const mdLinks = extractMarkdownLinks(answer);
+		sources.push(...mdLinks);
+	}
 
 	return {
 		answer,
