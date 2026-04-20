@@ -6,6 +6,7 @@
  * Returns synthesized answers with web search sources.
  */
 import * as os from "node:os";
+import { fetchCodexModels } from "@oh-my-pi/pi-ai";
 import { $env, getAgentDbPath, readSseJson } from "@oh-my-pi/pi-utils";
 import packageJson from "../../../../package.json" with { type: "json" };
 import { AgentStorage } from "../../../session/agent-storage";
@@ -16,14 +17,31 @@ import { SearchProvider } from "./base";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_RESPONSES_PATH = "/codex/responses";
-const DEFAULT_MODEL = "gpt-5-codex-mini";
+const DEFAULT_MODEL = "gpt-5.4-mini";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
 
-function getModel(): string {
+let discoveredModel: string | null = null;
+
+async function resolveModel(auth: { accessToken: string; accountId: string }): Promise<string> {
 	const configuredModel = $env.PI_CODEX_WEB_SEARCH_MODEL?.trim();
-	return configuredModel ? configuredModel : DEFAULT_MODEL;
+	if (configuredModel) return configuredModel;
+
+	if (discoveredModel) return discoveredModel;
+
+	try {
+		const result = await fetchCodexModels({
+			accessToken: auth.accessToken,
+			accountId: auth.accountId,
+		});
+		if (result?.models.length) {
+			discoveredModel = result.models[0]!.id;
+			return discoveredModel;
+		}
+	} catch {}
+
+	return DEFAULT_MODEL;
 }
 
 export interface CodexSearchParams {
@@ -197,7 +215,7 @@ async function callCodexSearch(
 	const url = `${CODEX_BASE_URL}${CODEX_RESPONSES_PATH}`;
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId);
 
-	const requestedModel = getModel();
+	const requestedModel = await resolveModel(auth);
 
 	const body: Record<string, unknown> = {
 		model: requestedModel,
