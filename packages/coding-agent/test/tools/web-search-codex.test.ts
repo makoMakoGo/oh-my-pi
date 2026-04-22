@@ -77,6 +77,33 @@ function makeImagePlaceholderSseResponse(model: string): string {
 	].join("\n");
 }
 
+function makeNoAnnotationsSseResponse(model: string): string {
+	return [
+		`data: ${JSON.stringify({
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				content: [
+					{
+						type: "output_text",
+						text: "Here is a result.\n\nSource: https://techcrunch.com/2025/01/03/article\n\nMore info at [Example](https://example.com/page).",
+						annotations: [],
+					},
+				],
+			},
+		})}`,
+		"",
+		`data: ${JSON.stringify({
+			type: "response.completed",
+			response: {
+				id: "resp_codex_no_annot_test",
+				model,
+			},
+		})}`,
+		"",
+	].join("\n");
+}
+
 describe("searchCodex model selection", () => {
 	let capturedRequest: CapturedRequest | null = null;
 
@@ -120,26 +147,26 @@ describe("searchCodex model selection", () => {
 
 	it("uses the built-in default model when PI_CODEX_WEB_SEARCH_MODEL is unset", async () => {
 		delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
-		using _hook = mockCodexFetch("gpt-5-codex-mini");
+		using _hook = mockCodexFetch("gpt-5.4");
 
 		const result = await searchCodex({ query: "default codex model" });
 
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
-		expect(capturedRequest?.body?.model).toBe("gpt-5-codex-mini");
-		expect(result.model).toBe("gpt-5-codex-mini");
+		expect(capturedRequest?.body?.model).toBe("gpt-5.4");
+		expect(result.model).toBe("gpt-5.4");
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
 	});
 
 	it("falls back to the default model when PI_CODEX_WEB_SEARCH_MODEL is blank", async () => {
 		process.env.PI_CODEX_WEB_SEARCH_MODEL = "   ";
-		using _hook = mockCodexFetch("gpt-5-codex-mini");
+		using _hook = mockCodexFetch("gpt-5.4");
 
 		const result = await searchCodex({ query: "blank codex model" });
 
 		expect(capturedRequest).not.toBeNull();
-		expect(capturedRequest?.body?.model).toBe("gpt-5-codex-mini");
-		expect(result.model).toBe("gpt-5-codex-mini");
+		expect(capturedRequest?.body?.model).toBe("gpt-5.4");
+		expect(result.model).toBe("gpt-5.4");
 	});
 
 	it("uses PI_CODEX_WEB_SEARCH_MODEL when provided", async () => {
@@ -182,6 +209,36 @@ describe("searchCodex model selection", () => {
 				title: "https://platform.openai.com/docs/api-reference/responses",
 				url: "https://platform.openai.com/docs/api-reference/responses",
 			},
+		]);
+	});
+
+	it("extracts URLs from answer text when annotations are absent (Codex ChatGPT OAuth)", async () => {
+		vi.spyOn(AgentStorage, "open").mockResolvedValue({
+			listAuthCredentials: () => [
+				{
+					id: 1,
+					credential: {
+						type: "oauth",
+						access: "test-access-token",
+						expires: Date.now() + 600_000,
+						accountId: "acct-test",
+					},
+				},
+			],
+		} as unknown as AgentStorage);
+		using _hook = hookFetch(() => {
+			return new Response(makeNoAnnotationsSseResponse("gpt-5.4"), {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		});
+
+		const result = await searchCodex({ query: "codex oauth no annotations" });
+
+		expect(result.answer).toContain("https://techcrunch.com/2025/01/03/article");
+		expect(result.sources).toEqual([
+			{ title: "Example", url: "https://example.com/page" },
+			{ title: "https://techcrunch.com/2025/01/03/article", url: "https://techcrunch.com/2025/01/03/article" },
 		]);
 	});
 });

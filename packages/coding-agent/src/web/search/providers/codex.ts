@@ -16,10 +16,15 @@ import { SearchProvider } from "./base";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_RESPONSES_PATH = "/codex/responses";
-const DEFAULT_MODEL = "gpt-5-codex-mini";
+const DEFAULT_MODEL = "gpt-5.4";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
+
+/** Regex to extract URLs from plain text when annotations are absent. */
+const URL_PATTERN = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/g;
+/** Regex to extract markdown-style links [title](url). */
+const MARKDOWN_LINK_PATTERN = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
 
 function getModel(): string {
 	const configuredModel = $env.PI_CODEX_WEB_SEARCH_MODEL?.trim();
@@ -92,6 +97,36 @@ interface CodexResponse {
 
 function isImagePlaceholderAnswer(text: string): boolean {
 	return text.trim().toLowerCase() === "(see attached image)";
+}
+
+/**
+ * Extracts URLs from answer text as a fallback when url_citation annotations are absent.
+ * Codex ChatGPT OAuth path often embeds URLs directly in the text instead of annotations.
+ */
+function extractUrlsFromText(text: string): SearchSource[] {
+	const sources: SearchSource[] = [];
+	const seen = new Set<string>();
+
+	// Extract markdown-style links [title](url)
+	for (const match of text.matchAll(MARKDOWN_LINK_PATTERN)) {
+		const url = match[2];
+		const title = match[1];
+		if (!url || seen.has(url)) continue;
+		seen.add(url);
+		sources.push({ title: title || url, url });
+	}
+
+	// Extract plain URLs
+	for (const match of text.matchAll(URL_PATTERN)) {
+		let url = match[0];
+		// Strip trailing punctuation that is unlikely part of the URL
+		url = url.replace(/[.,;:!?")]+$/, "");
+		if (seen.has(url)) continue;
+		seen.add(url);
+		sources.push({ title: url, url });
+	}
+
+	return sources;
 }
 
 /**
@@ -320,6 +355,13 @@ async function callCodexSearch(
 			: streamedAnswer.length > 0
 				? streamedAnswer
 				: finalAnswer;
+
+	// Fallback: extract URLs from answer text when annotations are absent.
+	// Codex ChatGPT OAuth path embeds URLs directly in text instead of url_citation annotations.
+	if (sources.length === 0 && answer.length > 0) {
+		const extracted = extractUrlsFromText(answer);
+		sources.push(...extracted);
+	}
 
 	return {
 		answer,
