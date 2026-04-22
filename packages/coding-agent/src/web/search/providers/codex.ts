@@ -16,7 +16,7 @@ import { SearchProvider } from "./base";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_RESPONSES_PATH = "/codex/responses";
-const DEFAULT_MODEL = "gpt-5-codex-mini";
+const DEFAULT_MODEL = "gpt-5.4";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
@@ -60,7 +60,15 @@ interface CodexResponseItem {
 	arguments?: string;
 	content?: CodexContentPart[];
 	summary?: Array<{ type: string; text: string }>;
+	action?: CodexWebSearchAction;
 }
+
+/** Web search call action types from the Codex Responses API */
+type CodexWebSearchAction =
+	| { type: "search"; query?: string; queries?: string[] }
+	| { type: "open_page"; url?: string }
+	| { type: "find_in_page"; url?: string; pattern?: string }
+	| { type: string };
 
 interface CodexContentPart {
 	type: string;
@@ -287,6 +295,15 @@ async function callCodexSearch(
 					}
 				}
 			}
+
+			// Handle web_search_call items — extract source URLs from action data
+			if (item.type === "web_search_call" && item.action) {
+				const action = item.action as CodexWebSearchAction;
+				const actionUrl = (action as { type: string; url?: string }).url;
+				if (actionUrl && !sources.some(s => s.url === actionUrl)) {
+					sources.push({ title: actionUrl, url: actionUrl });
+				}
+			}
 		} else if (eventType === "response.completed" || eventType === "response.done") {
 			const resp = (rawEvent as { response?: CodexResponse }).response;
 			if (resp) {
@@ -321,17 +338,46 @@ async function callCodexSearch(
 				? streamedAnswer
 				: finalAnswer;
 
-	return {
-		answer,
-		sources,
-		model,
-		requestId,
-		usage,
-	};
-}
+		// Fallback: if no structured sources found, extract URLs from answer text.
+		// The ChatGPT Codex backend performs web search but does not return
+		// url_citation annotations, so URLs only appear inline in the answer.
+		if (sources.length === 0 && answer) {
+			extractUrlsFromText(answer, sources);
+		}
 
-/**
- * Executes a web search using OpenAI Codex's built-in web search tool.
+		return {
+			answer,
+			sources,
+			model,
+			requestId,
+			usage,
+		};
+	}
+
+	/** URL pattern matching http/https links */
+	const URL_RE = /https?:\/\/[^\s)\]>}"',!?.]+/g;
+
+	/** Domains to skip when extracting URLs from answer text */
+	const SKIP_DOMAINS = ["openai.com", "chatgpt.com", "chat.com", "api.openai.com"];
+
+	function extractUrlsFromText(text: string, sources: SearchSource[]): void {
+		const matches = text.matchAll(URL_RE);
+		for (const match of matches) {
+			let url = match[0];
+			url = url.replace(/[.,;:!?)>\]}"']+$/, "");
+			if (!url || sources.some(s => s.url === url)) continue;
+			try {
+				const host = new URL(url).hostname;
+				if (SKIP_DOMAINS.some(d => host === d || host.endsWith(`.${d}`))) continue;
+			} catch {
+				continue;
+			}
+			sources.push({ title: url, url });
+		}
+	}
+
+	/**
+	 * Executes a web search using OpenAI Codex's built-in web search tool.
  * Requires OAuth credentials stored in agent.db for provider "openai-codex".
  * @param params - Search parameters including query and optional settings
  * @returns Search response with synthesized answer, sources, and usage
